@@ -445,26 +445,62 @@
         setupConnectionEvents(connection);
     }
 
-    // Scan for devices by probing known peer patterns
+    // Fetch peer list from PeerJS server for cross-device discovery
+    async function fetchPeersFromServer() {
+        try {
+            // PeerJS cloud server peer listing API
+            const response = await fetch('https://0.peerjs.com/peerjs/peers', {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (!response.ok) return [];
+
+            const peers = await response.json();
+
+            // Filter for peers in our room (starting with "Public_")
+            return peers
+                .filter(id => id.startsWith(`${DEFAULT_ROOM}_`) && id !== `${DEFAULT_ROOM}_${myName}`)
+                .map(id => id.replace(`${DEFAULT_ROOM}_`, ''));
+        } catch (err) {
+            console.log('Could not fetch peer list from server:', err.message);
+            return [];
+        }
+    }
+
+    // Scan for devices by probing known peer patterns AND fetching from server
     async function scanForDevices() {
         if (isScanning || !peer || peer.disconnected) return;
 
         isScanning = true;
         elements.scanBtn?.classList.add('scanning');
 
-        // Broadcast our presence first
+        // Broadcast our presence first (for same-device discovery)
         broadcastPresence();
 
-        // Try to probe saved peers
-        const probePeers = [];
+        // Collect peers to probe from multiple sources
+        const peersToProbe = new Set();
+
+        // 1. Add saved peers from localStorage
         discoveredPeers.forEach((data, name) => {
             if (name !== myName && !connectedPeers[`${DEFAULT_ROOM}_${name}`]) {
-                probePeers.push(name);
+                peersToProbe.add(name);
             }
         });
 
-        // Probe each saved peer (with timeout)
-        for (const name of probePeers.slice(0, 5)) {
+        // 2. Fetch peers from PeerJS server (cross-device discovery!)
+        try {
+            const serverPeers = await fetchPeersFromServer();
+            serverPeers.forEach(name => {
+                if (name !== myName && !connectedPeers[`${DEFAULT_ROOM}_${name}`]) {
+                    peersToProbe.add(name);
+                }
+            });
+        } catch (_) {}
+
+        // Probe each peer (limit to 10 to avoid overwhelming)
+        const probeArray = Array.from(peersToProbe).slice(0, 10);
+        for (const name of probeArray) {
             await probePeer(name);
         }
 
@@ -472,7 +508,7 @@
             isScanning = false;
             elements.scanBtn?.classList.remove('scanning');
             updateDiscoveredList();
-        }, 2000);
+        }, 1000);
     }
 
     // Probe a single peer to check if online
@@ -518,15 +554,32 @@
         });
     }
 
-    // Start presence broadcasting
+    // Start presence broadcasting and periodic discovery
     function startPresenceBroadcast() {
         broadcastPresence();
+
+        // Periodic presence broadcast (every 5 seconds)
         presenceInterval = setInterval(() => {
             broadcastPresence();
             // Cleanup offline peers completely
             cleanupOfflinePeers();
             updateDiscoveredList();
         }, PRESENCE_INTERVAL);
+
+        // Periodic server-based discovery (every 10 seconds)
+        setInterval(async () => {
+            if (!isScanning && peer && !peer.disconnected) {
+                try {
+                    const serverPeers = await fetchPeersFromServer();
+                    for (const name of serverPeers.slice(0, 5)) {
+                        if (name !== myName && !connectedPeers[`${DEFAULT_ROOM}_${name}`]) {
+                            // Quick probe without blocking
+                            probePeer(name);
+                        }
+                    }
+                } catch (_) {}
+            }
+        }, 10000);
     }
 
     // ==================== Peer Connection ====================
