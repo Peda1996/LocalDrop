@@ -1,5 +1,7 @@
 # LocalDrop
 
+**[Live Demo](https://peda1996.github.io/LocalDrop/)**
+
 A peer-to-peer file sharing web application that allows you to share files directly between devices on the same network without uploading to any server.
 
 ## Features
