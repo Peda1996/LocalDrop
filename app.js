@@ -1,38 +1,40 @@
 /**
  * LocalDrop - P2P File Sharing
- * Cross-browser hardening:
- * - Clipboard: fallback for Firefox/insecure contexts
- * - Key events: use keydown instead of deprecated keypress
- * - File transfer: chunked WebRTC DataChannel sending with backpressure
- * - Receiving: per-connection transfer state (handles multiple peers safely)
- * - Auto-discovery: BroadcastChannel + localStorage for finding nearby devices
+ * Discovery: IP-based room system (like ShareDrop)
+ * - Devices on same network share public IP = same room
+ * - Numbered peer slots for discovery
+ * - BroadcastChannel for same-browser tabs
  */
 
 (() => {
     // Config
     const ANIMALS = ['Fox', 'Bat', 'Cat', 'Dog', 'Owl', 'Yak', 'Ant', 'Bee', 'Elk', 'Emu'];
     const ADJECTIVES = ['Red', 'Blue', 'Fast', 'Calm', 'Cool', 'Hot', 'Wise', 'Zen', 'Bold', 'Kind'];
-    const DEFAULT_ROOM = 'Public';
     const STORAGE_KEY = 'localdrop_peers';
     const BROADCAST_CHANNEL = 'localdrop_presence';
-    const PRESENCE_INTERVAL = 5000; // 5 seconds
-    const PEER_TIMEOUT = 15000; // 15 seconds - consider peer offline
+    const PRESENCE_INTERVAL = 5000;
+    const PEER_TIMEOUT = 15000;
+    const MAX_ROOM_SLOTS = 10; // Max devices per room
+    const DISCOVERY_INTERVAL = 8000; // Scan every 8 seconds
 
-    // DataChannel tuning (conservative for Firefox/Chromium)
-    const CHUNK_SIZE = 64 * 1024;          // 64KB
-    const MAX_BUFFERED = 8 * 1024 * 1024;  // 8MB
-    const BUFFER_LOW = 2 * 1024 * 1024;    // 2MB
+    // DataChannel tuning
+    const CHUNK_SIZE = 64 * 1024;
+    const MAX_BUFFERED = 8 * 1024 * 1024;
+    const BUFFER_LOW = 2 * 1024 * 1024;
 
     // State
     let peer = null;
     let conn = null;
     let myName = '';
+    let mySlot = 0;
+    let roomId = 'local'; // Will be set based on IP
     let selectedFiles = [];
     let connectedPeers = {};
     let connectingPeers = {};
-    let discoveredPeers = new Map(); // name -> { lastSeen, online }
+    let discoveredPeers = new Map();
     let broadcastChannel = null;
     let presenceInterval = null;
+    let discoveryInterval = null;
     let isScanning = false;
 
     // Receive state per peer-id
@@ -84,23 +86,21 @@
         elements.discoveredList = document.getElementById('discoveredList');
     }
 
-    // UI Helpers
+    // ==================== UI Helpers ====================
+
     let toastTimeout = null;
 
     function showToast(msg) {
-        // Clear any existing timeout
         if (toastTimeout) {
             clearTimeout(toastTimeout);
             toastTimeout = null;
         }
 
-        // Create toast content with close button
         elements.toast.innerHTML = `
             <span class="toast-message">${escapeHtml(msg)}</span>
             <button class="toast-close" aria-label="Close">&times;</button>
         `;
 
-        // Add close button handler
         const closeBtn = elements.toast.querySelector('.toast-close');
         if (closeBtn) {
             closeBtn.onclick = () => hideToast();
@@ -158,7 +158,13 @@
         return I18n.t('hoursAgo', { n: hours });
     }
 
-    // Clipboard (works on Chrome/Edge; Firefox may require HTTPS + permissions)
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Clipboard
     async function copyToClipboard(text) {
         try {
             if (navigator.clipboard && window.isSecureContext) {
@@ -167,7 +173,6 @@
             }
         } catch (_) {}
 
-        // Fallback for Firefox / insecure contexts
         try {
             const ta = document.createElement('textarea');
             ta.value = text;
@@ -184,6 +189,62 @@
         }
     }
 
+    // ==================== IP-Based Room Discovery ====================
+
+    // Get public IP and create room ID
+    async function getPublicIP() {
+        const apis = [
+            'https://api.ipify.org?format=json',
+            'https://api.my-ip.io/ip.json',
+            'https://ipapi.co/json/'
+        ];
+
+        for (const api of apis) {
+            try {
+                const response = await fetch(api, { timeout: 5000 });
+                const data = await response.json();
+                return data.ip || data.IPv4 || null;
+            } catch (_) {}
+        }
+        return null;
+    }
+
+    // Create a short hash from IP for room ID
+    function hashIP(ip) {
+        let hash = 0;
+        for (let i = 0; i < ip.length; i++) {
+            const char = ip.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash;
+        }
+        return Math.abs(hash).toString(36).substring(0, 6);
+    }
+
+    // Peer names by ID (discovered via handshake)
+    const peerNames = new Map();
+
+    // Generate peer ID: LD_{room}_{slot} (no name - discovered via handshake)
+    function getPeerId(slot) {
+        return `LD_${roomId}_${slot}`;
+    }
+
+    // Parse peer ID to extract room and slot
+    function parsePeerId(peerId) {
+        const parts = peerId.split('_');
+        if (parts.length >= 3 && parts[0] === 'LD') {
+            return {
+                room: parts[1],
+                slot: parseInt(parts[2], 10)
+            };
+        }
+        return null;
+    }
+
+    // Get display name for a peer (from handshake or fallback)
+    function getPeerName(peerId) {
+        return peerNames.get(peerId) || `Device ${parsePeerId(peerId)?.slot || '?'}`;
+    }
+
     // ==================== Device Detection ====================
 
     function getDeviceInfo() {
@@ -191,7 +252,6 @@
         let deviceType = 'desktop';
         let browser = 'Unknown';
 
-        // Detect device type
         if (/Mobile|Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua)) {
             if (/iPad|Tablet/i.test(ua)) {
                 deviceType = 'tablet';
@@ -200,7 +260,6 @@
             }
         }
 
-        // Detect browser
         if (ua.includes('Firefox/')) {
             browser = 'Firefox';
         } else if (ua.includes('Edg/')) {
@@ -227,9 +286,8 @@
         }
     }
 
-    // ==================== Discovery System ====================
+    // ==================== BroadcastChannel (Same Browser) ====================
 
-    // Initialize BroadcastChannel for same-origin discovery
     function initBroadcastChannel() {
         try {
             if (typeof BroadcastChannel === 'undefined') return;
@@ -237,12 +295,12 @@
             broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL);
 
             broadcastChannel.onmessage = (event) => {
-                const { type, name, timestamp, deviceType, browser } = event.data || {};
+                const { type, name, peerId, timestamp, deviceType, browser } = event.data || {};
                 if (type === 'presence' && name && name !== myName) {
-                    addDiscoveredPeer(name, timestamp, true, { deviceType, browser });
+                    addDiscoveredPeer(name, peerId, timestamp, true, { deviceType, browser });
                 }
                 if (type === 'goodbye' && name) {
-                    markPeerOffline(name);
+                    removePeer(name);
                 }
             };
         } catch (e) {
@@ -250,14 +308,14 @@
         }
     }
 
-    // Broadcast our presence
     function broadcastPresence() {
-        if (broadcastChannel) {
+        if (broadcastChannel && peer) {
             try {
                 const { deviceType, browser } = getDeviceInfo();
                 broadcastChannel.postMessage({
                     type: 'presence',
                     name: myName,
+                    peerId: peer.id,
                     timestamp: Date.now(),
                     deviceType,
                     browser
@@ -266,7 +324,6 @@
         }
     }
 
-    // Broadcast goodbye when leaving
     function broadcastGoodbye() {
         if (broadcastChannel) {
             try {
@@ -278,95 +335,164 @@
         }
     }
 
-    // Load saved peers from localStorage
-    function loadSavedPeers() {
-        try {
-            const saved = localStorage.getItem(STORAGE_KEY);
-            if (saved) {
-                const peers = JSON.parse(saved);
-                peers.forEach(p => {
-                    if (p.name && p.name !== myName) {
-                        discoveredPeers.set(p.name, {
-                            lastSeen: p.lastSeen || Date.now(),
-                            online: false
-                        });
-                    }
-                });
-            }
-        } catch (_) {}
-    }
+    // ==================== Peer Discovery ====================
 
-    // Save peers to localStorage
-    function savePeers() {
-        try {
-            const peers = [];
-            discoveredPeers.forEach((data, name) => {
-                peers.push({ name, lastSeen: data.lastSeen });
-            });
-            // Keep only most recent 20 peers
-            peers.sort((a, b) => b.lastSeen - a.lastSeen);
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(peers.slice(0, 20)));
-        } catch (_) {}
-    }
-
-    // Add a discovered peer
-    function addDiscoveredPeer(name, timestamp, online = false, deviceInfo = {}) {
+    function addDiscoveredPeer(name, peerId, timestamp, online = false, deviceInfo = {}) {
         if (name === myName) return;
-        if (connectedPeers[`${DEFAULT_ROOM}_${name}`]) return; // Already connected
+        if (connectedPeers[peerId]) return;
 
         const existing = discoveredPeers.get(name);
         const firstSeen = existing?.firstSeen || timestamp || Date.now();
 
         discoveredPeers.set(name, {
+            peerId: peerId,
             lastSeen: timestamp || Date.now(),
             firstSeen: firstSeen,
             online: online,
             deviceType: deviceInfo.deviceType || existing?.deviceType || 'desktop',
             browser: deviceInfo.browser || existing?.browser || 'Unknown'
         });
-        savePeers();
         updateDiscoveredList();
     }
 
-    // Mark a peer as offline
-    function markPeerOffline(name) {
-        const peer = discoveredPeers.get(name);
-        if (peer) {
-            peer.online = false;
-            updateDiscoveredList();
-        }
+    function removePeer(name) {
+        discoveredPeers.delete(name);
+        updateDiscoveredList();
     }
 
-    // Remove connected peers from discovered list
-    function cleanupDiscoveredList() {
-        Object.keys(connectedPeers).forEach(peerId => {
-            const name = peerId.split('_')[1];
-            discoveredPeers.delete(name);
+    function cleanupOfflinePeers() {
+        const now = Date.now();
+        const toRemove = [];
+
+        discoveredPeers.forEach((data, name) => {
+            if (!data.online || (now - data.lastSeen) > PEER_TIMEOUT * 2) {
+                toRemove.push(name);
+            }
         });
-        updateDiscoveredList();
+
+        toRemove.forEach(name => discoveredPeers.delete(name));
     }
 
-    // Update the discovered devices UI - only show online peers
+    // Scan room for other devices
+    async function scanRoom() {
+        if (isScanning || !peer || peer.disconnected) return;
+
+        isScanning = true;
+        elements.scanBtn?.classList.add('scanning');
+
+        // Broadcast presence for same-browser discovery
+        broadcastPresence();
+
+        // Scan all slots in our room
+        const probePromises = [];
+        for (let slot = 0; slot < MAX_ROOM_SLOTS; slot++) {
+            if (slot === mySlot) continue; // Skip our own slot
+
+            // Try each slot
+            probePromises.push(probeSlot(slot));
+        }
+
+        await Promise.all(probePromises);
+
+        setTimeout(() => {
+            isScanning = false;
+            elements.scanBtn?.classList.remove('scanning');
+            updateDiscoveredList();
+        }, 500);
+    }
+
+    // Probe a specific slot to check if a peer exists there
+    async function probeSlot(slot) {
+        return new Promise((resolve) => {
+            if (!peer || peer.disconnected) {
+                resolve(false);
+                return;
+            }
+
+            const targetId = `LD_${roomId}_${slot}`;
+
+            // Don't probe ourselves
+            if (targetId === peer.id) {
+                resolve(false);
+                return;
+            }
+
+            // Already connected?
+            if (connectedPeers[targetId]) {
+                resolve(true);
+                return;
+            }
+
+            let resolved = false;
+
+            try {
+                const probeConn = peer.connect(targetId, { reliable: true });
+
+                const timeout = setTimeout(() => {
+                    if (!resolved) {
+                        resolved = true;
+                        try { probeConn.close(); } catch (_) {}
+                        resolve(false);
+                    }
+                }, 3000);
+
+                probeConn.on('open', () => {
+                    if (!resolved) {
+                        resolved = true;
+                        clearTimeout(timeout);
+
+                        // Send our info for handshake
+                        sendHandshake(probeConn);
+
+                        // Setup connection
+                        setupConnectionEvents(probeConn);
+                        resolve(true);
+                    }
+                });
+
+                probeConn.on('error', () => {
+                    if (!resolved) {
+                        resolved = true;
+                        clearTimeout(timeout);
+                        resolve(false);
+                    }
+                });
+            } catch (_) {
+                resolve(false);
+            }
+        });
+    }
+
+    // Send handshake with our device info
+    function sendHandshake(connection) {
+        const { deviceType, browser } = getDeviceInfo();
+        try {
+            connection.send(JSON.stringify({
+                t: 'handshake',
+                name: myName,
+                deviceType: deviceType,
+                browser: browser
+            }));
+        } catch (_) {}
+    }
+
     function updateDiscoveredList() {
         const container = elements.discoveredList;
         if (!container) return;
 
-        // Filter: only online peers, exclude connected and self
         const onlinePeers = [];
         const now = Date.now();
 
         discoveredPeers.forEach((data, name) => {
             if (name === myName) return;
-            if (connectedPeers[`${DEFAULT_ROOM}_${name}`]) return;
+            if (connectedPeers[data.peerId]) return;
 
-            // Only include if online (seen recently)
             const isOnline = data.online && (now - data.lastSeen) < PEER_TIMEOUT;
             if (isOnline) {
                 onlinePeers.push({ name, ...data });
             }
         });
 
-        // Sort by last seen (most recent first)
         onlinePeers.sort((a, b) => b.lastSeen - a.lastSeen);
 
         if (onlinePeers.length === 0) {
@@ -402,238 +528,123 @@
                 </div>
                 <button class="btn-quick-connect">${I18n.t('connect')}</button>
             `;
-            div.querySelector('.btn-quick-connect').onclick = () => quickConnect(p.name);
+            div.querySelector('.btn-quick-connect').onclick = () => connectToPeerId(p.peerId);
             container.appendChild(div);
         });
     }
 
-    // Remove offline peers from storage
-    function cleanupOfflinePeers() {
-        const now = Date.now();
-        const toRemove = [];
+    // ==================== Peer Connection ====================
 
-        discoveredPeers.forEach((data, name) => {
-            // Remove if offline for more than 30 seconds
-            if (!data.online || (now - data.lastSeen) > 30000) {
-                toRemove.push(name);
+    async function joinRoom() {
+        if (peer) peer.destroy();
+
+        // Get public IP for room-based discovery
+        const ip = await getPublicIP();
+        if (ip) {
+            roomId = hashIP(ip);
+            console.log('Room ID (from IP):', roomId);
+        } else {
+            roomId = 'local';
+            console.log('Could not get IP, using local room');
+        }
+
+        // Find an available slot
+        await findAvailableSlot();
+    }
+
+    async function findAvailableSlot() {
+        // Try slots 0-9 until we find one that's not taken
+        for (let slot = 0; slot < MAX_ROOM_SLOTS; slot++) {
+            const success = await trySlot(slot);
+            if (success) {
+                mySlot = slot;
+                return;
             }
-        });
-
-        toRemove.forEach(name => discoveredPeers.delete(name));
-        if (toRemove.length > 0) {
-            savePeers();
-        }
-    }
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    // Quick connect to a discovered peer
-    function quickConnect(name) {
-        if (!peer || peer.disconnected) {
-            showToast(I18n.t('notReadyYet'));
-            return;
         }
 
-        const targetId = `${DEFAULT_ROOM}_${name}`;
-        showToast(I18n.t('connectingTo', { name }));
-
-        const connection = peer.connect(targetId);
-        setupConnectionEvents(connection);
+        // All slots taken, use random high slot
+        mySlot = MAX_ROOM_SLOTS + Math.floor(Math.random() * 90);
+        await trySlot(mySlot);
     }
 
-    // Fetch peer list from PeerJS server for cross-device discovery
-    async function fetchPeersFromServer() {
-        try {
-            // PeerJS cloud server peer listing API
-            const response = await fetch('https://0.peerjs.com/peerjs/peers', {
-                method: 'GET',
-                headers: { 'Accept': 'application/json' }
-            });
+    async function trySlot(slot) {
+        return new Promise((resolve) => {
+            const peerId = getPeerId(slot);
 
-            if (!response.ok) return [];
+            elements.statusDot.classList.add('off');
 
-            const peers = await response.json();
-
-            // Filter for peers in our room (starting with "Public_")
-            return peers
-                .filter(id => id.startsWith(`${DEFAULT_ROOM}_`) && id !== `${DEFAULT_ROOM}_${myName}`)
-                .map(id => id.replace(`${DEFAULT_ROOM}_`, ''));
-        } catch (err) {
-            console.log('Could not fetch peer list from server:', err.message);
-            return [];
-        }
-    }
-
-    // Scan for devices by probing known peer patterns AND fetching from server
-    async function scanForDevices() {
-        if (isScanning || !peer || peer.disconnected) return;
-
-        isScanning = true;
-        elements.scanBtn?.classList.add('scanning');
-
-        // Broadcast our presence first (for same-device discovery)
-        broadcastPresence();
-
-        // Collect peers to probe from multiple sources
-        const peersToProbe = new Set();
-
-        // 1. Add saved peers from localStorage
-        discoveredPeers.forEach((data, name) => {
-            if (name !== myName && !connectedPeers[`${DEFAULT_ROOM}_${name}`]) {
-                peersToProbe.add(name);
-            }
-        });
-
-        // 2. Fetch peers from PeerJS server (cross-device discovery!)
-        try {
-            const serverPeers = await fetchPeersFromServer();
-            serverPeers.forEach(name => {
-                if (name !== myName && !connectedPeers[`${DEFAULT_ROOM}_${name}`]) {
-                    peersToProbe.add(name);
+            peer = new Peer(peerId, {
+                debug: 0,
+                config: {
+                    iceServers: [
+                        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+                    ]
                 }
             });
-        } catch (_) {}
 
-        // Probe each peer (limit to 10 to avoid overwhelming)
-        const probeArray = Array.from(peersToProbe).slice(0, 10);
-        for (const name of probeArray) {
-            await probePeer(name);
-        }
-
-        setTimeout(() => {
-            isScanning = false;
-            elements.scanBtn?.classList.remove('scanning');
-            updateDiscoveredList();
-        }, 1000);
-    }
-
-    // Probe a single peer to check if online
-    async function probePeer(name) {
-        return new Promise((resolve) => {
-            const targetId = `${DEFAULT_ROOM}_${name}`;
-            let resolved = false;
-
-            try {
-                const probeConn = peer.connect(targetId, { reliable: false });
-
-                const timeout = setTimeout(() => {
-                    if (!resolved) {
-                        resolved = true;
-                        markPeerOffline(name);
-                        try { probeConn.close(); } catch (_) {}
-                        resolve(false);
-                    }
-                }, 3000);
-
-                probeConn.on('open', () => {
-                    if (!resolved) {
-                        resolved = true;
-                        clearTimeout(timeout);
-                        addDiscoveredPeer(name, Date.now(), true);
-                        // Keep connection open and setup events
-                        setupConnectionEvents(probeConn);
-                        resolve(true);
-                    }
-                });
-
-                probeConn.on('error', () => {
-                    if (!resolved) {
-                        resolved = true;
-                        clearTimeout(timeout);
-                        markPeerOffline(name);
-                        resolve(false);
-                    }
-                });
-            } catch (_) {
+            const timeout = setTimeout(() => {
+                peer.destroy();
                 resolve(false);
-            }
+            }, 5000);
+
+            peer.on('open', () => {
+                clearTimeout(timeout);
+                elements.statusDot.classList.remove('off');
+                console.log('Connected as:', peerId);
+                showToast(I18n.t('ready'));
+
+                // Start discovery
+                startDiscovery();
+                updateDeviceList();
+                resolve(true);
+            });
+
+            peer.on('connection', handleIncomingConnection);
+
+            peer.on('error', (err) => {
+                clearTimeout(timeout);
+
+                if (err.type === 'unavailable-id') {
+                    // Slot taken, try next
+                    peer.destroy();
+                    resolve(false);
+                } else if (err.type === 'peer-unavailable') {
+                    if (!isScanning) {
+                        showToast(I18n.t('deviceNotFound'));
+                    }
+                } else if (err.type === 'network') {
+                    showToast(I18n.t('networkError'));
+                }
+            });
+
+            peer.on('disconnected', () => {
+                elements.statusDot.classList.add('off');
+                setTimeout(() => {
+                    try { peer.reconnect(); } catch (_) {}
+                }, 2000);
+            });
         });
     }
 
-    // Start presence broadcasting and periodic discovery
-    function startPresenceBroadcast() {
+    function startDiscovery() {
+        // Same-browser discovery
+        initBroadcastChannel();
         broadcastPresence();
 
-        // Periodic presence broadcast (every 5 seconds)
+        // Periodic presence broadcast
         presenceInterval = setInterval(() => {
             broadcastPresence();
-            // Cleanup offline peers completely
             cleanupOfflinePeers();
             updateDiscoveredList();
         }, PRESENCE_INTERVAL);
 
-        // Periodic server-based discovery (every 10 seconds)
-        setInterval(async () => {
-            if (!isScanning && peer && !peer.disconnected) {
-                try {
-                    const serverPeers = await fetchPeersFromServer();
-                    for (const name of serverPeers.slice(0, 5)) {
-                        if (name !== myName && !connectedPeers[`${DEFAULT_ROOM}_${name}`]) {
-                            // Quick probe without blocking
-                            probePeer(name);
-                        }
-                    }
-                } catch (_) {}
-            }
-        }, 10000);
-    }
+        // Periodic room scan
+        discoveryInterval = setInterval(() => {
+            scanRoom();
+        }, DISCOVERY_INTERVAL);
 
-    // ==================== Peer Connection ====================
-
-    function joinRoom(room) {
-        if (peer) peer.destroy();
-
-        const myFullId = `${room}_${myName}`;
-        elements.statusDot.classList.add('off');
-
-        peer = new Peer(myFullId, {
-            debug: 0,
-            config: {
-                iceServers: [
-                    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }
-                ]
-            }
-        });
-
-        peer.on('open', () => {
-            elements.statusDot.classList.remove('off');
-            showToast(I18n.t('ready'));
-            updateDeviceList();
-
-            // Start discovery after peer is ready
-            startPresenceBroadcast();
-            setTimeout(() => scanForDevices(), 1000);
-        });
-
-        peer.on('connection', handleIncomingConnection);
-
-        peer.on('error', (err) => {
-            if (err.type === 'unavailable-id') {
-                myName = generateNickname();
-                renderMyName();
-                joinRoom(room);
-            } else if (err.type === 'peer-unavailable') {
-                // Don't show toast for probe failures
-                if (!isScanning) {
-                    showToast(I18n.t('deviceNotFound'));
-                }
-            } else if (err.type === 'network') {
-                showToast(I18n.t('networkError'));
-            } else {
-                showToast(`Error: ${err.type || 'unknown'}`);
-            }
-        });
-
-        peer.on('disconnected', () => {
-            elements.statusDot.classList.add('off');
-            setTimeout(() => {
-                try { peer.reconnect(); } catch (_) {}
-            }, 2000);
-        });
+        // Initial scan
+        setTimeout(() => scanRoom(), 1000);
     }
 
     function connectToPeer() {
@@ -645,27 +656,81 @@
             return;
         }
 
-        const targetId = `${DEFAULT_ROOM}_${targetNick}`;
-        showToast(I18n.t('connectingTo', { name: targetNick }));
+        // Try to find the peer in discovered list first
+        const discovered = discoveredPeers.get(targetNick);
+        if (discovered && discovered.peerId) {
+            connectToPeerId(discovered.peerId);
+        } else {
+            // Try common slot patterns
+            showToast(I18n.t('connectingTo', { name: targetNick }));
+            tryConnectByName(targetNick);
+        }
 
-        const connection = peer.connect(targetId);
-        setupConnectionEvents(connection);
         elements.targetNick.value = '';
     }
 
+    async function tryConnectByName(name) {
+        // Scan all slots to find this user via handshake
+        // Since peer IDs don't contain names, we connect and the handshake reveals the name
+        let found = false;
+
+        for (let slot = 0; slot < MAX_ROOM_SLOTS; slot++) {
+            if (slot === mySlot) continue;
+
+            const targetId = `LD_${roomId}_${slot}`;
+
+            // Skip if already connected
+            if (connectedPeers[targetId]) {
+                // Check if this connected peer has the name we're looking for
+                if (peerNames.get(targetId) === name) {
+                    found = true;
+                    break;
+                }
+                continue;
+            }
+
+            // Try to connect to this slot
+            const success = await probeSlot(slot);
+            if (success) {
+                // Give time for handshake
+                await new Promise(r => setTimeout(r, 500));
+
+                // Check if we found our target
+                if (peerNames.get(targetId) === name) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found) {
+            showToast(I18n.t('deviceNotFound'));
+        }
+    }
+
+    function connectToPeerId(peerId) {
+        if (!peer || peer.disconnected) {
+            showToast(I18n.t('notReadyYet'));
+            return;
+        }
+
+        const nick = getPeerName(peerId);
+        showToast(I18n.t('connectingTo', { name: nick }));
+
+        const connection = peer.connect(peerId);
+        setupConnectionEvents(connection);
+    }
+
     function handleIncomingConnection(c) {
-        const nick = c.peer.split('_')[1];
+        const nick = getPeerName(c.peer);
         showToast(I18n.t('connected', { name: nick }));
-
-        // Add to discovered peers
-        addDiscoveredPeer(nick, Date.now(), true);
-
         setupConnectionEvents(c);
     }
 
     function setupConnectionEvents(c) {
         c.on('open', () => {
-            const nick = c.peer.split('_')[1];
+            const nick = getPeerName(c.peer);
+
             delete connectingPeers[c.peer];
             connectedPeers[c.peer] = c;
 
@@ -674,8 +739,14 @@
                 try { dc.bufferedAmountLowThreshold = BUFFER_LOW; } catch (_) {}
             }
 
+            // Send our handshake
+            sendHandshake(c);
+
             // Remove from discovered since now connected
-            discoveredPeers.delete(nick);
+            const knownName = peerNames.get(c.peer);
+            if (knownName) {
+                discoveredPeers.delete(knownName);
+            }
 
             updateDeviceList();
             updateDiscoveredList();
@@ -685,14 +756,13 @@
         c.on('data', (data) => handleData(data, c));
 
         c.on('close', () => {
-            const nick = c.peer.split('_')[1];
+            const nick = getPeerName(c.peer);
+
             incoming.delete(c.peer);
+            peerNames.delete(c.peer);
             delete connectedPeers[c.peer];
             delete connectingPeers[c.peer];
             if (conn === c) conn = null;
-
-            // Add back to discovered peers
-            addDiscoveredPeer(nick, Date.now(), false);
 
             updateDeviceList();
             updateDiscoveredList();
@@ -701,6 +771,7 @@
 
         c.on('error', () => {
             incoming.delete(c.peer);
+            peerNames.delete(c.peer);
             delete connectedPeers[c.peer];
             delete connectingPeers[c.peer];
             if (conn === c) conn = null;
@@ -720,7 +791,7 @@
 
         container.innerHTML = `<div class="card-label">${I18n.t('connectedDevices')}</div>`;
         peers.forEach(c => {
-            const nick = c.peer.split('_')[1];
+            const nick = getPeerName(c.peer);
             const div = document.createElement('div');
             div.className = `device-item ${conn === c ? 'selected' : ''}`;
             div.innerHTML = `<div class="status-dot"></div>${escapeHtml(nick)}`;
@@ -748,7 +819,8 @@
         elements.sendBtn.disabled = !(conn && selectedFiles.length > 0) || isReceivingOnSelectedConn();
     }
 
-    // File Handling
+    // ==================== File Handling ====================
+
     function initFileHandling() {
         elements.dropZone.addEventListener('click', () => elements.fileInput.click());
 
@@ -920,13 +992,27 @@
             updateSendButton();
         };
 
-        // Control messages as string JSON
         if (typeof data === 'string') {
             let msg;
             try { msg = JSON.parse(data); } catch (_) { return; }
             if (!msg || typeof msg !== 'object') return;
 
             const type = msg.t || msg.type;
+
+            // Handle handshake (device info exchange)
+            if (type === 'handshake') {
+                if (msg.name && peerId) {
+                    peerNames.set(peerId, msg.name);
+                    addDiscoveredPeer(msg.name, peerId, Date.now(), true, {
+                        deviceType: msg.deviceType || 'desktop',
+                        browser: msg.browser || 'Unknown'
+                    });
+                    updateDeviceList();
+                    updateDiscoveredList();
+                }
+                return;
+            }
+
             if (type === 'meta') {
                 setState(msg);
                 return;
@@ -949,55 +1035,7 @@
             return;
         }
 
-        // Backward compatibility: object messages
-        if (data && typeof data === 'object' && !(data instanceof Blob) && !(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
-            if (data.type === 'meta') {
-                setState(data);
-                return;
-            }
-
-            if (data.type === 'chunk') {
-                const s = getState();
-                if (!s || !s.meta || (s.meta.id && data.id && s.meta.id !== data.id)) return;
-
-                const part = data.data;
-                if (part instanceof Blob) {
-                    s.chunks.push(part);
-                    s.receivedBytes += part.size;
-                } else if (part instanceof ArrayBuffer) {
-                    s.chunks.push(part);
-                    s.receivedBytes += part.byteLength;
-                } else if (ArrayBuffer.isView(part)) {
-                    const sliced = part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength);
-                    s.chunks.push(sliced);
-                    s.receivedBytes += part.byteLength;
-                }
-
-                const total = s.meta.size || 1;
-                const pct = Math.min(99, Math.round((s.receivedBytes / total) * 100));
-                updateProgress(pct, `${I18n.t('receiving')} ${formatBytes(s.receivedBytes)} / ${formatBytes(total)}`);
-                return;
-            }
-
-            if (data.type === 'end') {
-                const s = getState();
-                if (!s || !s.meta || (s.meta.id && data.id && s.meta.id !== data.id)) return;
-
-                const blob = new Blob(s.chunks, { type: s.meta.mime || 'application/octet-stream' });
-                downloadFile(blob, s.meta.name);
-
-                showToast(I18n.t('receivedFile', { name: s.meta.name }));
-                updateProgress(100, I18n.t('received'));
-                setTimeout(() => hideProgress(), 800);
-
-                incoming.delete(peerId);
-                updateSendButton();
-                return;
-            }
-            return;
-        }
-
-        // Binary chunk (Blob / ArrayBuffer / TypedArray)
+        // Binary chunk
         const s = getState();
         if (!s || !s.meta) return;
 
@@ -1020,7 +1058,7 @@
 
         const total = s.meta.size || 1;
         const pct = Math.min(99, Math.round((s.receivedBytes / total) * 100));
-        updateProgress(pct, `Receiving... ${formatBytes(s.receivedBytes)} / ${formatBytes(total)}`);
+        updateProgress(pct, `${I18n.t('receiving')} ${formatBytes(s.receivedBytes)} / ${formatBytes(total)}`);
     }
 
     function downloadFile(blob, name) {
@@ -1034,14 +1072,13 @@
         URL.revokeObjectURL(url);
     }
 
-    // Render
+    // ==================== Name Editing ====================
+
     function renderMyName() {
         elements.myName.textContent = myName;
         elements.myIdBox.textContent = myName;
     }
 
-    // Initialize
-    // Name editing functions
     function startEditingName() {
         if (isEditingName) return;
         isEditingName = true;
@@ -1052,7 +1089,7 @@
         elements.myIdInput.focus();
         elements.myIdInput.select();
         elements.editNameBtn.classList.add('editing');
-        elements.editNameBtn.innerHTML = '&#10003;'; // checkmark
+        elements.editNameBtn.innerHTML = '&#10003;';
     }
 
     function finishEditingName() {
@@ -1061,14 +1098,12 @@
         const newName = (elements.myIdInput.value || '').trim().replace(/[^a-zA-Z0-9]/g, '');
 
         if (newName && newName !== myName && newName.length >= 3) {
-            const oldName = myName;
             myName = newName;
             renderMyName();
 
-            // Rejoin with new name
             if (peer) {
                 broadcastGoodbye();
-                joinRoom(DEFAULT_ROOM);
+                joinRoom();
             }
             showToast(I18n.t('nameChanged', { name: myName }));
         } else if (newName.length > 0 && newName.length < 3) {
@@ -1079,7 +1114,7 @@
         elements.myIdBox.style.display = 'block';
         elements.myIdInput.style.display = 'none';
         elements.editNameBtn.classList.remove('editing');
-        elements.editNameBtn.innerHTML = '&#9998;'; // pencil
+        elements.editNameBtn.innerHTML = '&#9998;';
     }
 
     function cancelEditingName() {
@@ -1090,17 +1125,14 @@
         elements.editNameBtn.innerHTML = '&#9998;';
     }
 
+    // ==================== Initialize ====================
+
     function init() {
         initElements();
         myName = generateNickname();
         renderMyName();
 
-        // Initialize discovery
-        initBroadcastChannel();
-        loadSavedPeers();
-        updateDiscoveredList();
-
-        // Click-to-copy name (only when not editing)
+        // Click-to-copy name
         elements.myIdBox.addEventListener('click', async () => {
             if (!isEditingName) {
                 const ok = await copyToClipboard(myName);
@@ -1129,7 +1161,6 @@
             });
 
             elements.myIdInput.addEventListener('blur', () => {
-                // Small delay to allow button click to register first
                 setTimeout(() => {
                     if (isEditingName) finishEditingName();
                 }, 150);
@@ -1144,7 +1175,7 @@
 
         // Scan button
         if (elements.scanBtn) {
-            elements.scanBtn.addEventListener('click', scanForDevices);
+            elements.scanBtn.addEventListener('click', scanRoom);
         }
 
         // Send action
@@ -1153,22 +1184,21 @@
         // File handling
         initFileHandling();
 
-        // Join room
-        joinRoom(DEFAULT_ROOM);
+        // Join room (IP-based)
+        joinRoom();
 
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
             broadcastGoodbye();
             if (presenceInterval) clearInterval(presenceInterval);
+            if (discoveryInterval) clearInterval(discoveryInterval);
         });
 
-        // Helpful hint for local file:// usage
         if (location.protocol === 'file:') {
             showToast(I18n.t('httpsHint'));
         }
     }
 
-    // Start app when DOM is ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
