@@ -85,10 +85,37 @@
     }
 
     // UI Helpers
+    let toastTimeout = null;
+
     function showToast(msg) {
-        elements.toast.textContent = msg;
+        // Clear any existing timeout
+        if (toastTimeout) {
+            clearTimeout(toastTimeout);
+            toastTimeout = null;
+        }
+
+        // Create toast content with close button
+        elements.toast.innerHTML = `
+            <span class="toast-message">${escapeHtml(msg)}</span>
+            <button class="toast-close" aria-label="Close">&times;</button>
+        `;
+
+        // Add close button handler
+        const closeBtn = elements.toast.querySelector('.toast-close');
+        if (closeBtn) {
+            closeBtn.onclick = () => hideToast();
+        }
+
         elements.toast.classList.add('visible');
-        setTimeout(() => elements.toast.classList.remove('visible'), 3000);
+        toastTimeout = setTimeout(() => hideToast(), 5000);
+    }
+
+    function hideToast() {
+        elements.toast.classList.remove('visible');
+        if (toastTimeout) {
+            clearTimeout(toastTimeout);
+            toastTimeout = null;
+        }
     }
 
     function updateProgress(percent, text) {
@@ -157,6 +184,49 @@
         }
     }
 
+    // ==================== Device Detection ====================
+
+    function getDeviceInfo() {
+        const ua = navigator.userAgent;
+        let deviceType = 'desktop';
+        let browser = 'Unknown';
+
+        // Detect device type
+        if (/Mobile|Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua)) {
+            if (/iPad|Tablet/i.test(ua)) {
+                deviceType = 'tablet';
+            } else {
+                deviceType = 'mobile';
+            }
+        }
+
+        // Detect browser
+        if (ua.includes('Firefox/')) {
+            browser = 'Firefox';
+        } else if (ua.includes('Edg/')) {
+            browser = 'Edge';
+        } else if (ua.includes('Chrome/')) {
+            browser = 'Chrome';
+        } else if (ua.includes('Safari/') && !ua.includes('Chrome')) {
+            browser = 'Safari';
+        } else if (ua.includes('Opera') || ua.includes('OPR/')) {
+            browser = 'Opera';
+        }
+
+        return { deviceType, browser };
+    }
+
+    function getDeviceIcon(deviceType) {
+        switch (deviceType) {
+            case 'mobile':
+                return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>`;
+            case 'tablet':
+                return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>`;
+            default:
+                return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`;
+        }
+    }
+
     // ==================== Discovery System ====================
 
     // Initialize BroadcastChannel for same-origin discovery
@@ -167,9 +237,9 @@
             broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL);
 
             broadcastChannel.onmessage = (event) => {
-                const { type, name, timestamp } = event.data || {};
+                const { type, name, timestamp, deviceType, browser } = event.data || {};
                 if (type === 'presence' && name && name !== myName) {
-                    addDiscoveredPeer(name, timestamp, true);
+                    addDiscoveredPeer(name, timestamp, true, { deviceType, browser });
                 }
                 if (type === 'goodbye' && name) {
                     markPeerOffline(name);
@@ -184,10 +254,13 @@
     function broadcastPresence() {
         if (broadcastChannel) {
             try {
+                const { deviceType, browser } = getDeviceInfo();
                 broadcastChannel.postMessage({
                     type: 'presence',
                     name: myName,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    deviceType,
+                    browser
                 });
             } catch (_) {}
         }
@@ -237,13 +310,19 @@
     }
 
     // Add a discovered peer
-    function addDiscoveredPeer(name, timestamp, online = false) {
+    function addDiscoveredPeer(name, timestamp, online = false, deviceInfo = {}) {
         if (name === myName) return;
         if (connectedPeers[`${DEFAULT_ROOM}_${name}`]) return; // Already connected
 
+        const existing = discoveredPeers.get(name);
+        const firstSeen = existing?.firstSeen || timestamp || Date.now();
+
         discoveredPeers.set(name, {
             lastSeen: timestamp || Date.now(),
-            online: online
+            firstSeen: firstSeen,
+            online: online,
+            deviceType: deviceInfo.deviceType || existing?.deviceType || 'desktop',
+            browser: deviceInfo.browser || existing?.browser || 'Unknown'
         });
         savePeers();
         updateDiscoveredList();
@@ -291,20 +370,37 @@
         onlinePeers.sort((a, b) => b.lastSeen - a.lastSeen);
 
         if (onlinePeers.length === 0) {
-            container.innerHTML = `<div class="no-devices">${I18n.t('noDevicesFound')}</div>`;
+            container.innerHTML = `
+                <div class="empty-state">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M16 16s-1.5-2-4-2-4 2-4 2"/>
+                        <line x1="9" y1="9" x2="9.01" y2="9"/>
+                        <line x1="15" y1="9" x2="15.01" y2="9"/>
+                    </svg>
+                    <span>${I18n.t('noDevicesFound')}</span>
+                </div>
+            `;
             return;
         }
 
         container.innerHTML = '';
         onlinePeers.slice(0, 10).forEach(p => {
+            const deviceIcon = getDeviceIcon(p.deviceType);
+            const timeOnline = formatTimeAgo(p.firstSeen);
+
             const div = document.createElement('div');
             div.className = 'discovered-item';
             div.innerHTML = `
                 <div class="discovered-item-info">
                     <div class="discovered-item-status"></div>
-                    <span class="discovered-item-name">${escapeHtml(p.name)}</span>
+                    <div class="discovered-item-device-icon" title="${p.deviceType}">${deviceIcon}</div>
+                    <div class="discovered-item-details">
+                        <span class="discovered-item-name">${escapeHtml(p.name)}</span>
+                        <span class="discovered-item-meta">${p.browser} • ${timeOnline}</span>
+                    </div>
                 </div>
-                <button class="btn-quick-connect">Connect</button>
+                <button class="btn-quick-connect">${I18n.t('connect')}</button>
             `;
             div.querySelector('.btn-quick-connect').onclick = () => quickConnect(p.name);
             container.appendChild(div);
