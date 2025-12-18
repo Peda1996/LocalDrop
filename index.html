@@ -17,26 +17,45 @@
             <div class="logo-icon">&#8644;</div>
             <span>Local</span>Drop
         </div>
-        <div class="status-badge">
-            <div class="status-dot off" id="statusDot"></div>
-            <span id="myName">...</span>
+        <div class="header-right">
+            <button class="theme-toggle" id="themeToggle" title="Toggle dark mode">
+                <span class="theme-icon-light">&#9790;</span>
+                <span class="theme-icon-dark">&#9728;</span>
+            </button>
+            <div class="lang-select-wrapper">
+                <select id="langSelect" class="lang-select">
+                    <option value="en">EN</option>
+                    <option value="de">DE</option>
+                    <option value="fr">FR</option>
+                    <option value="es">ES</option>
+                    <option value="it">IT</option>
+                    <option value="pt">PT</option>
+                    <option value="nl">NL</option>
+                    <option value="pl">PL</option>
+                </select>
+                <span class="lang-select-arrow">&#9662;</span>
+            </div>
+            <div class="status-badge">
+                <div class="status-dot off" id="statusDot"></div>
+                <span id="myName">...</span>
+            </div>
         </div>
     </header>
 
     <!-- Connection Card -->
     <div class="card">
-        <div class="card-label">Your Name (click to edit)</div>
+        <div class="card-label" data-i18n="yourName">Your Name (click to edit)</div>
         <div class="my-id-container">
             <div class="my-id-box" id="myIdBox">...</div>
             <input type="text" class="my-id-input" id="myIdInput" maxlength="20" style="display:none">
-            <button class="btn-edit-name" id="editNameBtn" title="Edit name">&#9998;</button>
+            <button class="btn-edit-name" id="editNameBtn" data-i18n-title="editName">&#9998;</button>
         </div>
 
         <div class="connect-section">
-            <div class="card-label">Connect to Device</div>
+            <div class="card-label" data-i18n="connectToDevice">Connect to Device</div>
             <div class="input-group">
-                <input type="text" id="targetNick" placeholder="Enter their name...">
-                <button class="btn-connect" id="connectBtn">Connect</button>
+                <input type="text" id="targetNick" data-i18n-placeholder="enterTheirName">
+                <button class="btn-connect" id="connectBtn" data-i18n="connect">Connect</button>
             </div>
         </div>
 
@@ -45,37 +64,43 @@
         <!-- Discovered Devices -->
         <div id="discoverySection" class="discovery-section">
             <div class="card-label">
-                <span>Nearby Devices</span>
-                <button class="btn-scan" id="scanBtn" title="Scan for devices">
+                <span data-i18n="nearbyDevices">Nearby Devices</span>
+                <button class="btn-scan" id="scanBtn" data-i18n-title="scanForDevices">
                     <span class="scan-icon">&#8635;</span>
                 </button>
             </div>
             <div id="discoveredList" class="discovered-list">
-                <div class="empty-state">Scanning for devices...</div>
+                <div class="empty-state" data-i18n="scanning">Scanning for devices...</div>
             </div>
         </div>
     </div>
 
     <!-- Send Card -->
     <div class="card">
-        <div class="card-label">Send Files</div>
+        <div class="card-label" data-i18n="sendFiles">Send Files</div>
         <div id="dropZone" class="drop-zone">
             <div class="drop-zone-icon">&#128193;</div>
-            <div class="drop-zone-text">Drop files here or click to browse</div>
-            <div class="drop-zone-hint">Supports any file type</div>
+            <div class="drop-zone-text" data-i18n="dropFiles">Drop files here or click to browse</div>
+            <div class="drop-zone-hint" data-i18n="supportsAnyFile">Supports any file type</div>
             <div class="file-info" id="fileInfo"></div>
             <input type="file" id="fileInput" multiple hidden>
         </div>
-        <button class="btn-send" id="sendBtn" disabled>Send Files</button>
+        <button class="btn-send" id="sendBtn" disabled data-i18n="sendFilesBtn">Send Files</button>
         <div class="progress-container" id="progressContainer">
             <div class="progress-bar"><div class="progress-fill" id="progressBar"></div></div>
             <div class="progress-text" id="progressText"></div>
         </div>
     </div>
+    <!-- Footer -->
+    <footer class="footer">
+        <p>Made by <a href="https://github.com/Peda1996" target="_blank" rel="noopener">Peda1996</a></p>
+        <p><a href="https://photogala.net" target="_blank" rel="noopener">photogala.net</a></p>
+    </footer>
 </div>
 
 <div class="toast" id="toast"></div>
 
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 
 </body>

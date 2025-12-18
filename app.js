@@ -123,12 +123,12 @@
 
     function formatTimeAgo(timestamp) {
         const seconds = Math.floor((Date.now() - timestamp) / 1000);
-        if (seconds < 10) return 'just now';
-        if (seconds < 60) return `${seconds}s ago`;
+        if (seconds < 10) return I18n.t('justNow');
+        if (seconds < 60) return I18n.t('secondsAgo', { n: seconds });
         const minutes = Math.floor(seconds / 60);
-        if (minutes < 60) return `${minutes}m ago`;
+        if (minutes < 60) return I18n.t('minutesAgo', { n: minutes });
         const hours = Math.floor(minutes / 60);
-        return `${hours}h ago`;
+        return I18n.t('hoursAgo', { n: hours });
     }
 
     // Clipboard (works on Chrome/Edge; Firefox may require HTTPS + permissions)
@@ -291,7 +291,7 @@
         onlinePeers.sort((a, b) => b.lastSeen - a.lastSeen);
 
         if (onlinePeers.length === 0) {
-            container.innerHTML = '<div class="no-devices">No nearby devices found</div>';
+            container.innerHTML = `<div class="no-devices">${I18n.t('noDevicesFound')}</div>`;
             return;
         }
 
@@ -338,12 +338,12 @@
     // Quick connect to a discovered peer
     function quickConnect(name) {
         if (!peer || peer.disconnected) {
-            showToast('Not ready yet');
+            showToast(I18n.t('notReadyYet'));
             return;
         }
 
         const targetId = `${DEFAULT_ROOM}_${name}`;
-        showToast(`Connecting to ${name}...`);
+        showToast(I18n.t('connectingTo', { name }));
 
         const connection = peer.connect(targetId);
         setupConnectionEvents(connection);
@@ -452,7 +452,7 @@
 
         peer.on('open', () => {
             elements.statusDot.classList.remove('off');
-            showToast('Ready to connect');
+            showToast(I18n.t('ready'));
             updateDeviceList();
 
             // Start discovery after peer is ready
@@ -470,10 +470,10 @@
             } else if (err.type === 'peer-unavailable') {
                 // Don't show toast for probe failures
                 if (!isScanning) {
-                    showToast('Device not found');
+                    showToast(I18n.t('deviceNotFound'));
                 }
             } else if (err.type === 'network') {
-                showToast('Network error - retrying...');
+                showToast(I18n.t('networkError'));
             } else {
                 showToast(`Error: ${err.type || 'unknown'}`);
             }
@@ -492,12 +492,12 @@
         if (!targetNick) return;
 
         if (!peer || peer.disconnected) {
-            showToast('Not ready yet');
+            showToast(I18n.t('notReadyYet'));
             return;
         }
 
         const targetId = `${DEFAULT_ROOM}_${targetNick}`;
-        showToast(`Connecting to ${targetNick}...`);
+        showToast(I18n.t('connectingTo', { name: targetNick }));
 
         const connection = peer.connect(targetId);
         setupConnectionEvents(connection);
@@ -506,7 +506,7 @@
 
     function handleIncomingConnection(c) {
         const nick = c.peer.split('_')[1];
-        showToast(`${nick} connected!`);
+        showToast(I18n.t('connected', { name: nick }));
 
         // Add to discovered peers
         addDiscoveredPeer(nick, Date.now(), true);
@@ -530,7 +530,7 @@
 
             updateDeviceList();
             updateDiscoveredList();
-            showToast(`${nick} joined`);
+            showToast(I18n.t('joined', { name: nick }));
         });
 
         c.on('data', (data) => handleData(data, c));
@@ -547,7 +547,7 @@
 
             updateDeviceList();
             updateDiscoveredList();
-            showToast(`${nick} left`);
+            showToast(I18n.t('left', { name: nick }));
         });
 
         c.on('error', () => {
@@ -569,7 +569,7 @@
             return;
         }
 
-        container.innerHTML = '<div class="card-label">Connected Devices</div>';
+        container.innerHTML = `<div class="card-label">${I18n.t('connectedDevices')}</div>`;
         peers.forEach(c => {
             const nick = c.peer.split('_')[1];
             const div = document.createElement('div');
@@ -629,7 +629,7 @@
 
         if (selectedFiles.length > 0) {
             const totalSize = selectedFiles.reduce((a, f) => a + (f.size || 0), 0);
-            elements.fileInfo.textContent = `${selectedFiles.length} file(s) - ${formatBytes(totalSize)}`;
+            elements.fileInfo.textContent = I18n.t('files', { n: selectedFiles.length, size: formatBytes(totalSize) });
             elements.fileInfo.classList.add('visible');
         } else {
             elements.fileInfo.classList.remove('visible');
@@ -680,18 +680,18 @@
     async function sendFiles() {
         if (!conn || selectedFiles.length === 0) return;
         if (isReceivingOnSelectedConn()) {
-            showToast('Receiving on this connection; try again after it finishes');
+            showToast(I18n.t('receivingBusy'));
             return;
         }
 
         elements.sendBtn.disabled = true;
-        showProgress('Preparing...');
+        showProgress(I18n.t('preparing'));
 
         try {
             let fileBlob, fileName, fileType;
 
             if (selectedFiles.length > 1) {
-                updateProgress(10, 'Zipping files...');
+                updateProgress(10, I18n.t('zipping'));
                 const zip = new JSZip();
                 selectedFiles.forEach(f => zip.file(f.name, f));
                 const ab = await zip.generateAsync({ type: 'arraybuffer' });
@@ -716,7 +716,7 @@
                 chunkSize: CHUNK_SIZE
             }));
 
-            updateProgress(15, 'Sending...');
+            updateProgress(15, I18n.t('sending'));
 
             let offset = 0;
             let seq = 0;
@@ -729,15 +729,15 @@
                 seq += 1;
 
                 const pct = Math.min(99, Math.round((offset / totalBytes) * 100));
-                updateProgress(pct, `Sending... ${formatBytes(offset)} / ${formatBytes(totalBytes)}`);
+                updateProgress(pct, `${I18n.t('sending')} ${formatBytes(offset)} / ${formatBytes(totalBytes)}`);
 
                 if (seq % 16 === 0) await new Promise(r => setTimeout(r, 0));
             }
 
             conn.send(JSON.stringify({ t: 'end', id: transferId }));
 
-            updateProgress(100, 'Sent!');
-            showToast(`Sent ${fileName}`);
+            updateProgress(100, I18n.t('sent'));
+            showToast(I18n.t('sentFile', { name: fileName }));
 
             setTimeout(() => {
                 hideProgress();
@@ -749,7 +749,7 @@
 
         } catch (err) {
             console.error(err);
-            showToast('Error sending file');
+            showToast(I18n.t('errorSending'));
             hideProgress();
             updateSendButton();
         }
@@ -766,8 +766,8 @@
                 receivedBytes: 0,
                 startedAt: Date.now()
             });
-            showToast(`Receiving ${metaObj.name}...`);
-            showProgress(`Receiving ${metaObj.name}...`);
+            showToast(I18n.t('receivingFile', { name: metaObj.name }));
+            showProgress(I18n.t('receivingFile', { name: metaObj.name }));
             updateSendButton();
         };
 
@@ -789,8 +789,8 @@
                 const blob = new Blob(s.chunks, { type: s.meta.mime || 'application/octet-stream' });
                 downloadFile(blob, s.meta.name);
 
-                showToast(`Received ${s.meta.name}`);
-                updateProgress(100, 'Received!');
+                showToast(I18n.t('receivedFile', { name: s.meta.name }));
+                updateProgress(100, I18n.t('received'));
                 setTimeout(() => hideProgress(), 800);
 
                 incoming.delete(peerId);
@@ -826,7 +826,7 @@
 
                 const total = s.meta.size || 1;
                 const pct = Math.min(99, Math.round((s.receivedBytes / total) * 100));
-                updateProgress(pct, `Receiving... ${formatBytes(s.receivedBytes)} / ${formatBytes(total)}`);
+                updateProgress(pct, `${I18n.t('receiving')} ${formatBytes(s.receivedBytes)} / ${formatBytes(total)}`);
                 return;
             }
 
@@ -837,8 +837,8 @@
                 const blob = new Blob(s.chunks, { type: s.meta.mime || 'application/octet-stream' });
                 downloadFile(blob, s.meta.name);
 
-                showToast(`Received ${s.meta.name}`);
-                updateProgress(100, 'Received!');
+                showToast(I18n.t('receivedFile', { name: s.meta.name }));
+                updateProgress(100, I18n.t('received'));
                 setTimeout(() => hideProgress(), 800);
 
                 incoming.delete(peerId);
@@ -921,9 +921,9 @@
                 broadcastGoodbye();
                 joinRoom(DEFAULT_ROOM);
             }
-            showToast(`Name changed to ${myName}`);
+            showToast(I18n.t('nameChanged', { name: myName }));
         } else if (newName.length > 0 && newName.length < 3) {
-            showToast('Name must be at least 3 characters');
+            showToast(I18n.t('nameTooShort'));
         }
 
         isEditingName = false;
@@ -955,7 +955,7 @@
         elements.myIdBox.addEventListener('click', async () => {
             if (!isEditingName) {
                 const ok = await copyToClipboard(myName);
-                showToast(ok ? 'Name copied!' : 'Copy failed (try HTTPS / allow clipboard)');
+                showToast(ok ? I18n.t('nameCopied') : I18n.t('copyFailed'));
             }
         });
 
@@ -1015,7 +1015,7 @@
 
         // Helpful hint for local file:// usage
         if (location.protocol === 'file:') {
-            showToast('Tip: run via HTTPS/localhost for best browser support');
+            showToast(I18n.t('httpsHint'));
         }
     }
 
