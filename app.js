@@ -5,6 +5,7 @@
  * - Key events: use keydown instead of deprecated keypress
  * - File transfer: chunked WebRTC DataChannel sending with backpressure
  * - Receiving: per-connection transfer state (handles multiple peers safely)
+ * - Auto-discovery: BroadcastChannel + localStorage for finding nearby devices
  */
 
 (() => {
@@ -12,6 +13,10 @@
     const ANIMALS = ['Fox', 'Bat', 'Cat', 'Dog', 'Owl', 'Yak', 'Ant', 'Bee', 'Elk', 'Emu'];
     const ADJECTIVES = ['Red', 'Blue', 'Fast', 'Calm', 'Cool', 'Hot', 'Wise', 'Zen', 'Bold', 'Kind'];
     const DEFAULT_ROOM = 'Public';
+    const STORAGE_KEY = 'localdrop_peers';
+    const BROADCAST_CHANNEL = 'localdrop_presence';
+    const PRESENCE_INTERVAL = 5000; // 5 seconds
+    const PEER_TIMEOUT = 15000; // 15 seconds - consider peer offline
 
     // DataChannel tuning (conservative for Firefox/Chromium)
     const CHUNK_SIZE = 64 * 1024;          // 64KB
@@ -25,6 +30,10 @@
     let selectedFiles = [];
     let connectedPeers = {};
     let connectingPeers = {};
+    let discoveredPeers = new Map(); // name -> { lastSeen, online }
+    let broadcastChannel = null;
+    let presenceInterval = null;
+    let isScanning = false;
 
     // Receive state per peer-id
     const incoming = new Map();
@@ -44,7 +53,9 @@
         progressContainer: null,
         progressBar: null,
         progressText: null,
-        toast: null
+        toast: null,
+        scanBtn: null,
+        discoveredList: null
     };
 
     // Initialize DOM elements
@@ -63,6 +74,8 @@
         elements.progressBar = document.getElementById('progressBar');
         elements.progressText = document.getElementById('progressText');
         elements.toast = document.getElementById('toast');
+        elements.scanBtn = document.getElementById('scanBtn');
+        elements.discoveredList = document.getElementById('discoveredList');
     }
 
     // UI Helpers
@@ -102,6 +115,16 @@
         return `${adj}${ani}${num}`;
     }
 
+    function formatTimeAgo(timestamp) {
+        const seconds = Math.floor((Date.now() - timestamp) / 1000);
+        if (seconds < 10) return 'just now';
+        if (seconds < 60) return `${seconds}s ago`;
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes}m ago`;
+        const hours = Math.floor(minutes / 60);
+        return `${hours}h ago`;
+    }
+
     // Clipboard (works on Chrome/Edge; Firefox may require HTTPS + permissions)
     async function copyToClipboard(text) {
         try {
@@ -128,7 +151,273 @@
         }
     }
 
-    // Peer Connection
+    // ==================== Discovery System ====================
+
+    // Initialize BroadcastChannel for same-origin discovery
+    function initBroadcastChannel() {
+        try {
+            if (typeof BroadcastChannel === 'undefined') return;
+
+            broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL);
+
+            broadcastChannel.onmessage = (event) => {
+                const { type, name, timestamp } = event.data || {};
+                if (type === 'presence' && name && name !== myName) {
+                    addDiscoveredPeer(name, timestamp, true);
+                }
+                if (type === 'goodbye' && name) {
+                    markPeerOffline(name);
+                }
+            };
+        } catch (e) {
+            console.log('BroadcastChannel not available');
+        }
+    }
+
+    // Broadcast our presence
+    function broadcastPresence() {
+        if (broadcastChannel) {
+            try {
+                broadcastChannel.postMessage({
+                    type: 'presence',
+                    name: myName,
+                    timestamp: Date.now()
+                });
+            } catch (_) {}
+        }
+    }
+
+    // Broadcast goodbye when leaving
+    function broadcastGoodbye() {
+        if (broadcastChannel) {
+            try {
+                broadcastChannel.postMessage({
+                    type: 'goodbye',
+                    name: myName
+                });
+            } catch (_) {}
+        }
+    }
+
+    // Load saved peers from localStorage
+    function loadSavedPeers() {
+        try {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (saved) {
+                const peers = JSON.parse(saved);
+                peers.forEach(p => {
+                    if (p.name && p.name !== myName) {
+                        discoveredPeers.set(p.name, {
+                            lastSeen: p.lastSeen || Date.now(),
+                            online: false
+                        });
+                    }
+                });
+            }
+        } catch (_) {}
+    }
+
+    // Save peers to localStorage
+    function savePeers() {
+        try {
+            const peers = [];
+            discoveredPeers.forEach((data, name) => {
+                peers.push({ name, lastSeen: data.lastSeen });
+            });
+            // Keep only most recent 20 peers
+            peers.sort((a, b) => b.lastSeen - a.lastSeen);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(peers.slice(0, 20)));
+        } catch (_) {}
+    }
+
+    // Add a discovered peer
+    function addDiscoveredPeer(name, timestamp, online = false) {
+        if (name === myName) return;
+        if (connectedPeers[`${DEFAULT_ROOM}_${name}`]) return; // Already connected
+
+        discoveredPeers.set(name, {
+            lastSeen: timestamp || Date.now(),
+            online: online
+        });
+        savePeers();
+        updateDiscoveredList();
+    }
+
+    // Mark a peer as offline
+    function markPeerOffline(name) {
+        const peer = discoveredPeers.get(name);
+        if (peer) {
+            peer.online = false;
+            updateDiscoveredList();
+        }
+    }
+
+    // Remove connected peers from discovered list
+    function cleanupDiscoveredList() {
+        Object.keys(connectedPeers).forEach(peerId => {
+            const name = peerId.split('_')[1];
+            discoveredPeers.delete(name);
+        });
+        updateDiscoveredList();
+    }
+
+    // Update the discovered devices UI
+    function updateDiscoveredList() {
+        const container = elements.discoveredList;
+        if (!container) return;
+
+        // Filter out connected peers and self
+        const peers = [];
+        const now = Date.now();
+
+        discoveredPeers.forEach((data, name) => {
+            if (name === myName) return;
+            if (connectedPeers[`${DEFAULT_ROOM}_${name}`]) return;
+
+            // Check if online (seen recently)
+            const isOnline = data.online && (now - data.lastSeen) < PEER_TIMEOUT;
+            peers.push({ name, ...data, online: isOnline });
+        });
+
+        // Sort: online first, then by last seen
+        peers.sort((a, b) => {
+            if (a.online !== b.online) return b.online ? 1 : -1;
+            return b.lastSeen - a.lastSeen;
+        });
+
+        if (peers.length === 0) {
+            container.innerHTML = '<div class="no-devices">No nearby devices found</div>';
+            return;
+        }
+
+        container.innerHTML = '';
+        peers.slice(0, 10).forEach(p => {
+            const div = document.createElement('div');
+            div.className = 'discovered-item';
+            div.innerHTML = `
+                <div class="discovered-item-info">
+                    <div class="discovered-item-status ${p.online ? '' : 'offline'}"></div>
+                    <span class="discovered-item-name">${escapeHtml(p.name)}</span>
+                    <span class="discovered-item-time">${formatTimeAgo(p.lastSeen)}</span>
+                </div>
+                <button class="btn-quick-connect">Connect</button>
+            `;
+            div.querySelector('.btn-quick-connect').onclick = () => quickConnect(p.name);
+            container.appendChild(div);
+        });
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Quick connect to a discovered peer
+    function quickConnect(name) {
+        if (!peer || peer.disconnected) {
+            showToast('Not ready yet');
+            return;
+        }
+
+        const targetId = `${DEFAULT_ROOM}_${name}`;
+        showToast(`Connecting to ${name}...`);
+
+        const connection = peer.connect(targetId);
+        setupConnectionEvents(connection);
+    }
+
+    // Scan for devices by probing known peer patterns
+    async function scanForDevices() {
+        if (isScanning || !peer || peer.disconnected) return;
+
+        isScanning = true;
+        elements.scanBtn?.classList.add('scanning');
+
+        // Broadcast our presence first
+        broadcastPresence();
+
+        // Try to probe saved peers
+        const probePeers = [];
+        discoveredPeers.forEach((data, name) => {
+            if (name !== myName && !connectedPeers[`${DEFAULT_ROOM}_${name}`]) {
+                probePeers.push(name);
+            }
+        });
+
+        // Probe each saved peer (with timeout)
+        for (const name of probePeers.slice(0, 5)) {
+            await probePeer(name);
+        }
+
+        setTimeout(() => {
+            isScanning = false;
+            elements.scanBtn?.classList.remove('scanning');
+            updateDiscoveredList();
+        }, 2000);
+    }
+
+    // Probe a single peer to check if online
+    async function probePeer(name) {
+        return new Promise((resolve) => {
+            const targetId = `${DEFAULT_ROOM}_${name}`;
+            let resolved = false;
+
+            try {
+                const probeConn = peer.connect(targetId, { reliable: false });
+
+                const timeout = setTimeout(() => {
+                    if (!resolved) {
+                        resolved = true;
+                        markPeerOffline(name);
+                        try { probeConn.close(); } catch (_) {}
+                        resolve(false);
+                    }
+                }, 3000);
+
+                probeConn.on('open', () => {
+                    if (!resolved) {
+                        resolved = true;
+                        clearTimeout(timeout);
+                        addDiscoveredPeer(name, Date.now(), true);
+                        // Keep connection open and setup events
+                        setupConnectionEvents(probeConn);
+                        resolve(true);
+                    }
+                });
+
+                probeConn.on('error', () => {
+                    if (!resolved) {
+                        resolved = true;
+                        clearTimeout(timeout);
+                        markPeerOffline(name);
+                        resolve(false);
+                    }
+                });
+            } catch (_) {
+                resolve(false);
+            }
+        });
+    }
+
+    // Start presence broadcasting
+    function startPresenceBroadcast() {
+        broadcastPresence();
+        presenceInterval = setInterval(() => {
+            broadcastPresence();
+            // Cleanup stale online statuses
+            const now = Date.now();
+            discoveredPeers.forEach((data, name) => {
+                if (data.online && (now - data.lastSeen) > PEER_TIMEOUT) {
+                    data.online = false;
+                }
+            });
+            updateDiscoveredList();
+        }, PRESENCE_INTERVAL);
+    }
+
+    // ==================== Peer Connection ====================
+
     function joinRoom(room) {
         if (peer) peer.destroy();
 
@@ -148,6 +437,10 @@
             elements.statusDot.classList.remove('off');
             showToast('Ready to connect');
             updateDeviceList();
+
+            // Start discovery after peer is ready
+            startPresenceBroadcast();
+            setTimeout(() => scanForDevices(), 1000);
         });
 
         peer.on('connection', handleIncomingConnection);
@@ -158,7 +451,10 @@
                 renderMyName();
                 joinRoom(room);
             } else if (err.type === 'peer-unavailable') {
-                showToast('Device not found');
+                // Don't show toast for probe failures
+                if (!isScanning) {
+                    showToast('Device not found');
+                }
             } else if (err.type === 'network') {
                 showToast('Network error - retrying...');
             } else {
@@ -192,7 +488,12 @@
     }
 
     function handleIncomingConnection(c) {
-        showToast(`${c.peer.split('_')[1]} connected!`);
+        const nick = c.peer.split('_')[1];
+        showToast(`${nick} connected!`);
+
+        // Add to discovered peers
+        addDiscoveredPeer(nick, Date.now(), true);
+
         setupConnectionEvents(c);
     }
 
@@ -207,7 +508,11 @@
                 try { dc.bufferedAmountLowThreshold = BUFFER_LOW; } catch (_) {}
             }
 
+            // Remove from discovered since now connected
+            discoveredPeers.delete(nick);
+
             updateDeviceList();
+            updateDiscoveredList();
             showToast(`${nick} joined`);
         });
 
@@ -219,7 +524,12 @@
             delete connectedPeers[c.peer];
             delete connectingPeers[c.peer];
             if (conn === c) conn = null;
+
+            // Add back to discovered peers
+            addDiscoveredPeer(nick, Date.now(), false);
+
             updateDeviceList();
+            updateDiscoveredList();
             showToast(`${nick} left`);
         });
 
@@ -247,7 +557,7 @@
             const nick = c.peer.split('_')[1];
             const div = document.createElement('div');
             div.className = `device-item ${conn === c ? 'selected' : ''}`;
-            div.innerHTML = `<div class="status-dot"></div>${nick}`;
+            div.innerHTML = `<div class="status-dot"></div>${escapeHtml(nick)}`;
             div.onclick = () => selectDevice(c);
             container.appendChild(div);
         });
@@ -570,6 +880,11 @@
         myName = generateNickname();
         renderMyName();
 
+        // Initialize discovery
+        initBroadcastChannel();
+        loadSavedPeers();
+        updateDiscoveredList();
+
         // Click-to-copy name
         elements.myIdBox.addEventListener('click', async () => {
             const ok = await copyToClipboard(myName);
@@ -582,6 +897,11 @@
             if (e.key === 'Enter') connectToPeer();
         });
 
+        // Scan button
+        if (elements.scanBtn) {
+            elements.scanBtn.addEventListener('click', scanForDevices);
+        }
+
         // Send action
         elements.sendBtn.addEventListener('click', sendFiles);
 
@@ -590,6 +910,12 @@
 
         // Join room
         joinRoom(DEFAULT_ROOM);
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            broadcastGoodbye();
+            if (presenceInterval) clearInterval(presenceInterval);
+        });
 
         // Helpful hint for local file:// usage
         if (location.protocol === 'file:') {
