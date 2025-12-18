@@ -25,8 +25,12 @@
 
     <!-- Connection Card -->
     <div class="card">
-        <div class="card-label">Your Name (share this)</div>
-        <div class="my-id-box" id="myIdBox">...</div>
+        <div class="card-label">Your Name (click to edit)</div>
+        <div class="my-id-container">
+            <div class="my-id-box" id="myIdBox">...</div>
+            <input type="text" class="my-id-input" id="myIdInput" maxlength="20" style="display:none">
+            <button class="btn-edit-name" id="editNameBtn" title="Edit name">&#9998;</button>
+        </div>
 
         <div class="connect-section">
             <div class="card-label">Connect to Device</div>

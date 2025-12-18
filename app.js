@@ -43,6 +43,8 @@
         statusDot: null,
         myName: null,
         myIdBox: null,
+        myIdInput: null,
+        editNameBtn: null,
         targetNick: null,
         connectBtn: null,
         deviceList: null,
@@ -58,11 +60,15 @@
         discoveredList: null
     };
 
+    let isEditingName = false;
+
     // Initialize DOM elements
     function initElements() {
         elements.statusDot = document.getElementById('statusDot');
         elements.myName = document.getElementById('myName');
         elements.myIdBox = document.getElementById('myIdBox');
+        elements.myIdInput = document.getElementById('myIdInput');
+        elements.editNameBtn = document.getElementById('editNameBtn');
         elements.targetNick = document.getElementById('targetNick');
         elements.connectBtn = document.getElementById('connectBtn');
         elements.deviceList = document.getElementById('deviceList');
@@ -261,50 +267,66 @@
         updateDiscoveredList();
     }
 
-    // Update the discovered devices UI
+    // Update the discovered devices UI - only show online peers
     function updateDiscoveredList() {
         const container = elements.discoveredList;
         if (!container) return;
 
-        // Filter out connected peers and self
-        const peers = [];
+        // Filter: only online peers, exclude connected and self
+        const onlinePeers = [];
         const now = Date.now();
 
         discoveredPeers.forEach((data, name) => {
             if (name === myName) return;
             if (connectedPeers[`${DEFAULT_ROOM}_${name}`]) return;
 
-            // Check if online (seen recently)
+            // Only include if online (seen recently)
             const isOnline = data.online && (now - data.lastSeen) < PEER_TIMEOUT;
-            peers.push({ name, ...data, online: isOnline });
+            if (isOnline) {
+                onlinePeers.push({ name, ...data });
+            }
         });
 
-        // Sort: online first, then by last seen
-        peers.sort((a, b) => {
-            if (a.online !== b.online) return b.online ? 1 : -1;
-            return b.lastSeen - a.lastSeen;
-        });
+        // Sort by last seen (most recent first)
+        onlinePeers.sort((a, b) => b.lastSeen - a.lastSeen);
 
-        if (peers.length === 0) {
+        if (onlinePeers.length === 0) {
             container.innerHTML = '<div class="no-devices">No nearby devices found</div>';
             return;
         }
 
         container.innerHTML = '';
-        peers.slice(0, 10).forEach(p => {
+        onlinePeers.slice(0, 10).forEach(p => {
             const div = document.createElement('div');
             div.className = 'discovered-item';
             div.innerHTML = `
                 <div class="discovered-item-info">
-                    <div class="discovered-item-status ${p.online ? '' : 'offline'}"></div>
+                    <div class="discovered-item-status"></div>
                     <span class="discovered-item-name">${escapeHtml(p.name)}</span>
-                    <span class="discovered-item-time">${formatTimeAgo(p.lastSeen)}</span>
                 </div>
                 <button class="btn-quick-connect">Connect</button>
             `;
             div.querySelector('.btn-quick-connect').onclick = () => quickConnect(p.name);
             container.appendChild(div);
         });
+    }
+
+    // Remove offline peers from storage
+    function cleanupOfflinePeers() {
+        const now = Date.now();
+        const toRemove = [];
+
+        discoveredPeers.forEach((data, name) => {
+            // Remove if offline for more than 30 seconds
+            if (!data.online || (now - data.lastSeen) > 30000) {
+                toRemove.push(name);
+            }
+        });
+
+        toRemove.forEach(name => discoveredPeers.delete(name));
+        if (toRemove.length > 0) {
+            savePeers();
+        }
     }
 
     function escapeHtml(text) {
@@ -405,13 +427,8 @@
         broadcastPresence();
         presenceInterval = setInterval(() => {
             broadcastPresence();
-            // Cleanup stale online statuses
-            const now = Date.now();
-            discoveredPeers.forEach((data, name) => {
-                if (data.online && (now - data.lastSeen) > PEER_TIMEOUT) {
-                    data.online = false;
-                }
-            });
+            // Cleanup offline peers completely
+            cleanupOfflinePeers();
             updateDiscoveredList();
         }, PRESENCE_INTERVAL);
     }
@@ -875,6 +892,55 @@
     }
 
     // Initialize
+    // Name editing functions
+    function startEditingName() {
+        if (isEditingName) return;
+        isEditingName = true;
+
+        elements.myIdBox.style.display = 'none';
+        elements.myIdInput.style.display = 'block';
+        elements.myIdInput.value = myName;
+        elements.myIdInput.focus();
+        elements.myIdInput.select();
+        elements.editNameBtn.classList.add('editing');
+        elements.editNameBtn.innerHTML = '&#10003;'; // checkmark
+    }
+
+    function finishEditingName() {
+        if (!isEditingName) return;
+
+        const newName = (elements.myIdInput.value || '').trim().replace(/[^a-zA-Z0-9]/g, '');
+
+        if (newName && newName !== myName && newName.length >= 3) {
+            const oldName = myName;
+            myName = newName;
+            renderMyName();
+
+            // Rejoin with new name
+            if (peer) {
+                broadcastGoodbye();
+                joinRoom(DEFAULT_ROOM);
+            }
+            showToast(`Name changed to ${myName}`);
+        } else if (newName.length > 0 && newName.length < 3) {
+            showToast('Name must be at least 3 characters');
+        }
+
+        isEditingName = false;
+        elements.myIdBox.style.display = 'block';
+        elements.myIdInput.style.display = 'none';
+        elements.editNameBtn.classList.remove('editing');
+        elements.editNameBtn.innerHTML = '&#9998;'; // pencil
+    }
+
+    function cancelEditingName() {
+        isEditingName = false;
+        elements.myIdBox.style.display = 'block';
+        elements.myIdInput.style.display = 'none';
+        elements.editNameBtn.classList.remove('editing');
+        elements.editNameBtn.innerHTML = '&#9998;';
+    }
+
     function init() {
         initElements();
         myName = generateNickname();
@@ -885,11 +951,41 @@
         loadSavedPeers();
         updateDiscoveredList();
 
-        // Click-to-copy name
+        // Click-to-copy name (only when not editing)
         elements.myIdBox.addEventListener('click', async () => {
-            const ok = await copyToClipboard(myName);
-            showToast(ok ? 'Name copied!' : 'Copy failed (try HTTPS / allow clipboard)');
+            if (!isEditingName) {
+                const ok = await copyToClipboard(myName);
+                showToast(ok ? 'Name copied!' : 'Copy failed (try HTTPS / allow clipboard)');
+            }
         });
+
+        // Name editing
+        if (elements.editNameBtn) {
+            elements.editNameBtn.addEventListener('click', () => {
+                if (isEditingName) {
+                    finishEditingName();
+                } else {
+                    startEditingName();
+                }
+            });
+        }
+
+        if (elements.myIdInput) {
+            elements.myIdInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    finishEditingName();
+                } else if (e.key === 'Escape') {
+                    cancelEditingName();
+                }
+            });
+
+            elements.myIdInput.addEventListener('blur', () => {
+                // Small delay to allow button click to register first
+                setTimeout(() => {
+                    if (isEditingName) finishEditingName();
+                }, 150);
+            });
+        }
 
         // Connect actions
         elements.connectBtn.addEventListener('click', connectToPeer);
