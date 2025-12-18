@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LocalDrop - P2P File Sharing</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+
+<div class="app">
+    <!-- Header -->
+    <header class="header">
+        <div class="logo">
+            <div class="logo-icon">&#8644;</div>
+            <span>Local</span>Drop
+        </div>
+        <div class="status-badge">
+            <div class="status-dot off" id="statusDot"></div>
+            <span id="myName">...</span>
+        </div>
+    </header>
+
+    <!-- Connection Card -->
+    <div class="card">
+        <div class="card-label">Your Name (share this)</div>
+        <div class="my-id-box" id="myIdBox">...</div>
+
+        <div class="connect-section">
+            <div class="card-label">Connect to Device</div>
+            <div class="input-group">
+                <input type="text" id="targetNick" placeholder="Enter their name...">
+                <button class="btn-connect" id="connectBtn">Connect</button>
+            </div>
+        </div>
+
+        <div id="deviceList" class="device-list"></div>
+    </div>
+
+    <!-- Send Card -->
+    <div class="card">
+        <div class="card-label">Send Files</div>
+        <div id="dropZone" class="drop-zone">
+            <div class="drop-zone-icon">&#128193;</div>
+            <div class="drop-zone-text">Drop files here or click to browse</div>
+            <div class="drop-zone-hint">Supports any file type</div>
+            <div class="file-info" id="fileInfo"></div>
+            <input type="file" id="fileInput" multiple hidden>
+        </div>
+        <button class="btn-send" id="sendBtn" disabled>Send Files</button>
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-bar"><div class="progress-fill" id="progressBar"></div></div>
+            <div class="progress-text" id="progressText"></div>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+
+</body>
+</html>
